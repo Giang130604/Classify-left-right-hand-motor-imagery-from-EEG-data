@@ -1,199 +1,161 @@
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
 
-import numpy as np  
-import matplotlib.pyplot as plt  
-import mne  
-from mne.channels import make_standard_montage  
-from mne.datasets import eegbci 
-from mne.decoding import CSP  
-from mne.io import concatenate_raws, read_raw_edf  
-from mne.viz import plot_topomap  
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis  
-from sklearn.model_selection import ShuffleSplit, cross_val_score 
-from sklearn.pipeline import Pipeline  
+import matplotlib.pyplot as plt
+import mne
+import numpy as np
+from mne.decoding import CSP
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.model_selection import GroupShuffleSplit, cross_val_score
+from sklearn.pipeline import Pipeline
+
+from bci_utils import load_and_preprocess_raw, make_epochs
+
+# Store/download EEGBCI data inside the project (avoid C: drive)
+PROJECT_DIR = Path(__file__).resolve().parent
+MNE_DATA_DIR = PROJECT_DIR / "mne_data"
+mne.set_config("MNE_DATA", str(MNE_DATA_DIR), set_env=True)
+mne.set_config("MNE_DATASETS_EEGBCI_PATH", str(MNE_DATA_DIR), set_env=True)
+RESAMPLE_SFREQ = 160.0
+
+
+def load_subject_epochs(
+    subject: int,
+    runs: Sequence[int],
+    tmin: float,
+    tmax: float,
+) -> Tuple[np.ndarray, np.ndarray, mne.Epochs]:
+    """Load one subject and return epochs + labels (0=left, 1=right)."""
+    raw = load_and_preprocess_raw(subject=subject, runs=runs, resample_sfreq=RESAMPLE_SFREQ)
+    epochs, event_id = make_epochs(raw, tmin=tmin, tmax=tmax)
+
+    missing = [key for key in ("left_hand", "right_hand") if key not in event_id]
+    if missing:
+        raise ValueError(f"Subject {subject} missing events: {missing}")
+
+    label_map = {event_id["left_hand"]: 0, event_id["right_hand"]: 1}
+    y = np.array([label_map[ev] for ev in epochs.events[:, -1]], dtype=int)
+    X = epochs.get_data()
+    return X, y, epochs
+
+
+def build_dataset(
+    subjects: Iterable[int],
+    runs: Sequence[int],
+    tmin: float,
+    tmax: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int], List[int], mne.Epochs]:
+    """
+    Load multiple subjects and stack trials.
+
+    Returns
+    -------
+    X, y, groups : stacked data/labels/subject-ids per trial
+    loaded_subjects : subjects that were used
+    skipped_subjects : subjects skipped due to errors
+    example_epochs : epochs from the first loaded subject (for plotting)
+    """
+    X_all: List[np.ndarray] = []
+    y_all: List[np.ndarray] = []
+    groups: List[np.ndarray] = []
+    loaded: List[int] = []
+    skipped: List[int] = []
+    example_epochs: mne.Epochs | None = None
+
+    for subject in subjects:
+        try:
+            X_sub, y_sub, epochs_sub = load_subject_epochs(subject, runs, tmin, tmax)
+        except Exception as exc:  # noqa: BLE001 - keep reason visible
+            print(f"Skip subject {subject}: {exc}")
+            skipped.append(subject)
+            continue
+
+        X_all.append(X_sub)
+        y_all.append(y_sub)
+        groups.append(np.full(len(y_sub), subject, dtype=int))
+        loaded.append(subject)
+        if example_epochs is None:
+            example_epochs = epochs_sub
+
+    if not X_all:
+        raise RuntimeError("No subject data loaded.")
+
+    X = np.concatenate(X_all, axis=0)
+    y = np.concatenate(y_all, axis=0)
+    group_labels = np.concatenate(groups, axis=0)
+    return X, y, group_labels, loaded, skipped, example_epochs
+
+
+def split_subjects(
+    subjects: Sequence[int],
+    test_ratio: float = 0.2,
+    seed: int = 42,
+) -> Tuple[List[int], List[int]]:
+    """Shuffle subjects and split into train/test lists."""
+    rng = np.random.default_rng(seed)
+    shuffled = np.array(subjects)
+    rng.shuffle(shuffled)
+
+    n_test = max(1, int(len(shuffled) * test_ratio))
+    test_subjects = sorted(shuffled[:n_test].tolist())
+    train_subjects = sorted(shuffled[n_test:].tolist())
+    if not train_subjects:
+        raise ValueError("Train split is empty; reduce test_ratio or add subjects.")
+    return train_subjects, test_subjects
 
 
 def main() -> None:
-    """Tai du lieu, tien xu ly, epoch, huan luyen va danh gia mo hinh."""
+    runs = [4, 8, 12]
+    tmin, tmax = 0.5, 3.5
+    n_subjects = 100
+    test_ratio = 0.2  # 80/20 subject-level split
 
-    # --- 1. Tai du lieu ----------------------------------------------------
-    subject = 1  
-    runs = [4, 8, 12]  
-    raw_paths = eegbci.load_data(subject, runs)
+    MNE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"EEGBCI data directory: {MNE_DATA_DIR}")
 
-    # Doc tung file EDF va noi thanh mot raw duy nhat (preload de ghi vao RAM)
-    raws = [read_raw_edf(path, preload=True, stim_channel="auto") for path in raw_paths]
-    raw = concatenate_raws(raws)  # Noi cac doan run lai thanh mot Raw duy nhat
+    subjects = list(range(1, n_subjects + 1))
+    train_subjects, test_subjects = split_subjects(subjects, test_ratio=test_ratio, seed=42)
+    print(f"Train subjects ({len(train_subjects)}): {train_subjects[:5]} ...")
+    print(f"Test subjects  ({len(test_subjects)}): {test_subjects[:5]} ...")
 
-    # --- 2. Tien xu ly -----------------------------------------------------
-    montage = make_standard_montage("standard_1020")
-    standard_lookup = {name.upper(): name for name in montage.ch_names}
-    raw.rename_channels(lambda x: standard_lookup.get(x.rstrip(".").upper(), x.rstrip(".")))
-    raw.set_montage(montage)
+    X_train, y_train, groups_train, used_train, skipped_train, example_epochs = build_dataset(
+        train_subjects, runs, tmin, tmax
+    )
+    X_test, y_test, _, used_test, skipped_test, _ = build_dataset(test_subjects, runs, tmin, tmax)
 
-    # Loc thong day 7-30 Hz: Mu + Beta
-    raw.filter(l_freq=7.0, h_freq=30.0, fir_design="firwin", verbose=False)
+    print(f"Loaded train subjects: {len(used_train)} / {len(train_subjects)}")
+    if skipped_train:
+        print(f"Skipped (train): {skipped_train}")
+    print(f"Loaded test subjects: {len(used_test)} / {len(test_subjects)}")
+    if skipped_test:
+        print(f"Skipped (test): {skipped_test}")
 
-    # Chi lay kenh EEG, bo EOG/stim
-    raw.pick_types(eeg=True, eog=False, stim=False)
-
-    # --- 3. Epoching -------------------------------------------------------
-    events, event_id_map = mne.events_from_annotations(raw)
-
-    rest_id = event_id_map.get("T0", 1)
-    left_id = event_id_map.get("T1", 2)
-    right_id = event_id_map.get("T2", 3)
-
-    event_id = {"left_hand": left_id, "right_hand": right_id}
-    tmin, tmax = 0.0, 4.0
-
-    # Epoch MI (dung cho train CSP + LDA)
-    epochs = mne.Epochs(
-        raw,
-        events=events,
-        event_id=event_id,
-        tmin=tmin,
-        tmax=tmax,
-        baseline=None,
-        preload=True,
-        reject_by_annotation=True,
-        verbose=False,
+    clf = Pipeline(
+        [
+            ("csp", CSP(n_components=6, reg='ledoit_wolf', log=True, norm_trace=False)),
+            ("lda", LinearDiscriminantAnalysis()),
+        ]
     )
 
-    X = epochs.get_data()
-    y = epochs.events[:, -1]  # 2 = left, 3 = right
+    cv = GroupShuffleSplit(n_splits=5, test_size=0.2, random_state=42)
+    cv_scores = cross_val_score(clf, X_train, y_train, cv=cv, groups=groups_train, n_jobs=1)
+    print(f"Mean CV accuracy (grouped by subject): {np.mean(cv_scores):.3f}")
 
-    # --- 3b. Topomap cong suat & ERD tu data goc (truoc CSP) ---------------
-    # Epoch REST (T0) cung cua so 0–4 s
-    epochs_rest = mne.Epochs(
-        raw,
-        events=events,
-        event_id={"rest": rest_id},
-        tmin=tmin,
-        tmax=tmax,
-        baseline=None,
-        preload=True,
-        reject_by_annotation=True,
-        verbose=False,
-    )
+    clf.fit(X_train, y_train)
+    test_score = clf.score(X_test, y_test)
+    print(f"Held-out subject test accuracy: {test_score:.3f}")
 
-    # PSD 8–30 Hz
-    psd_rest = epochs_rest["rest"].compute_psd(fmin=8, fmax=30, method="welch")
-    psd_left = epochs["left_hand"].compute_psd(fmin=8, fmax=30, method="welch")
-    psd_right = epochs["right_hand"].compute_psd(fmin=8, fmax=30, method="welch")
-
-    # Trung binh theo epoch & tan so -> 1 gia tri / kenh
-    rest_power = psd_rest.get_data().mean(axis=(0, 2))
-    left_power = psd_left.get_data().mean(axis=(0, 2))
-    right_power = psd_right.get_data().mean(axis=(0, 2))
-
-    # ERD: Rest - MI (duong = giam cong suat khi MI)
-    erd_left = rest_power - left_power
-    erd_right = rest_power - right_power
-    diff_lr = left_power - right_power  # Left - Right (tong cong suat)
-
-    # ---- 3c. KIỂM TRA BẰNG BIỂU ĐỒ Ở C3/C4 -------------------------------
-    motor_chs = ["C3", "C4"]
-    picks_motor = mne.pick_channels(epochs.info["ch_names"], motor_chs)
-
-    motor_rest = rest_power[picks_motor]
-    motor_left = left_power[picks_motor]
-    motor_right = right_power[picks_motor]
-    motor_erd_left = erd_left[picks_motor]
-    motor_erd_right = erd_right[picks_motor]
-
-    # Biểu đồ 1: Rest vs Left vs Right tại C3/C4
-    x = np.arange(len(motor_chs))
-    width = 0.25
-
-    fig_bar, ax_bar = plt.subplots(figsize=(6, 4))
-    ax_bar.bar(x - width, motor_rest, width, label="Rest")
-    ax_bar.bar(x, motor_left, width, label="Left MI")
-    ax_bar.bar(x + width, motor_right, width, label="Right MI")
-    ax_bar.set_xticks(x)
-    ax_bar.set_xticklabels(motor_chs)
-    ax_bar.set_ylabel("Power 8–30 Hz")
-    ax_bar.set_title("Rest vs Left vs Right\n(power tại C3/C4)")
-    ax_bar.legend(loc="best")
-
-    # Biểu đồ 2: ERD (Rest-Left, Rest-Right) tại C3/C4
-    fig_erd, ax_erd = plt.subplots(figsize=(6, 4))
-    ax_erd.bar(x - width / 2, motor_erd_left, width, label="ERD Left (Rest-Left)")
-    ax_erd.bar(x + width / 2, motor_erd_right, width, label="ERD Right (Rest-Right)")
-    ax_erd.set_xticks(x)
-    ax_erd.set_xticklabels(motor_chs)
-    ax_erd.set_ylabel("Rest - MI (8–30 Hz)")
-    ax_erd.set_title("ERD tại C3/C4")
-    ax_erd.axhline(0, color="k", linewidth=0.8)
-    ax_erd.legend(loc="best")
-
-    print("=== Power 8–30 Hz tại C3/C4 ===")
-    for ch, r, l, ri in zip(motor_chs, motor_rest, motor_left, motor_right):
-        print(f"{ch}: Rest={r:.3f}, Left={l:.3f}, Right={ri:.3f}")
-    print("=== ERD (Rest-MI) tại C3/C4 ===")
-    for ch, el, er in zip(motor_chs, motor_erd_left, motor_erd_right):
-        print(f"{ch}: ERD Left={el:.3f}, ERD Right={er:.3f}")
-
-    # ---- 3d. Topomap ERD & Left-Right ------------------------------------
-    vmin_erd = min(erd_left.min(), erd_right.min())
-    vmax_erd = max(erd_left.max(), erd_right.max())
-
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3))
-    plot_topomap(
-        erd_left,
-        epochs.info,
-        axes=axes[0],
-        show=False,
-        contours=6,
-        cmap="RdBu_r",
-        vlim=(vmin_erd, vmax_erd),
-    )
-    axes[0].set_title("ERD Left: Rest - Left\n(8–30 Hz)")
-
-    plot_topomap(
-        erd_right,
-        epochs.info,
-        axes=axes[1],
-        show=False,
-        contours=6,
-        cmap="RdBu_r",
-        vlim=(vmin_erd, vmax_erd),
-    )
-    axes[1].set_title("ERD Right: Rest - Right\n(8–30 Hz)")
-
-    plot_topomap(
-        diff_lr,
-        epochs.info,
-        axes=axes[2],
-        show=False,
-        contours=6,
-        cmap="RdBu_r",
-    )
-    axes[2].set_title("Left - Right\n(8–30 Hz power)")
-    plt.tight_layout()
-
-    # --- 4. Xay dung pipeline CSP + LDA -----------------------------------
-    csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
-    lda = LinearDiscriminantAnalysis()
-    clf = Pipeline([("csp", csp), ("lda", lda)])
-
-    # --- 5. Danh gia cheo --------------------------------------------------
-    cv = ShuffleSplit(n_splits=10, test_size=0.2, random_state=42)
-    scores = cross_val_score(clf, X, y, cv=cv, n_jobs=1)
-    print(f"Do chinh xac trung binh (10-lap ShuffleSplit): {np.mean(scores):.3f}")
-
-    # --- 6. Truc quan hoa CSP ---------------------------------------------
-    clf.fit(X, y)
-    csp = clf.named_steps["csp"]
-
-    components_to_plot = list(range(min(8, csp.filters_.shape[0])))
-    csp.plot_patterns(
-        epochs.info,
-        ch_type="eeg",
-        units="Patterns (a.u.)",
-        size=1.5,
-        components=components_to_plot,
-    )
-    plt.show()
+    if example_epochs is not None:
+        csp = clf.named_steps["csp"]
+        components_to_plot = list(range(min(4, csp.filters_.shape[0])))
+        csp.plot_patterns(
+            example_epochs.info,
+            ch_type="eeg",
+            units="Patterns (a.u.)",
+            size=1.5,
+            components=components_to_plot,
+        )
+        plt.show()
 
 
 if __name__ == "__main__":
