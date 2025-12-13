@@ -27,7 +27,7 @@ def load_subject_epochs(
 ) -> Tuple[np.ndarray, np.ndarray, mne.Epochs]:
     """Load one subject and return epochs + labels (0=left, 1=right)."""
     raw = load_and_preprocess_raw(subject=subject, runs=runs, resample_sfreq=RESAMPLE_SFREQ)
-    epochs, event_id = make_epochs(raw, tmin=tmin, tmax=tmax)
+    epochs, event_id = make_epochs(raw, tmin=tmin, tmax=tmax, reject={"eeg": 180e-6})
 
     missing = [key for key in ("left_hand", "right_hand") if key not in event_id]
     if missing:
@@ -70,6 +70,14 @@ def build_dataset(
             skipped.append(subject)
             continue
 
+        kept = len(epochs_sub)
+        drop_stats = epochs_sub.drop_log_stats()
+        print(f"Subject {subject}: kept {kept} epochs (dropped: {drop_stats})")
+        if kept == 0:
+            print(f"Subject {subject} has zero epochs after reject -> skip.")
+            skipped.append(subject)
+            continue
+
         X_all.append(X_sub)
         y_all.append(y_sub)
         groups.append(np.full(len(y_sub), subject, dtype=int))
@@ -106,7 +114,8 @@ def split_subjects(
 
 def main() -> None:
     runs = [4, 8, 12]
-    tmin, tmax = 0.5, 3.5
+    # Cần tmin <= 0 để baseline correction (baseline=(None, 0)) hoạt động đúng
+    tmin, tmax = -0.5, 3.5
     n_subjects = 100
     test_ratio = 0.2  # 80/20 subject-level split
 
