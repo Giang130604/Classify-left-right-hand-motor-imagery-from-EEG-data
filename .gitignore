@@ -1,0 +1,45 @@
+# Byte-compiled / optimized files
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments / local site-packages
+.venv/
+venv/
+env/
+ENV/
+.env/
+.python-version
+
+# Packaging / build artifacts
+build/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# Logs / caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+.coverage*
+*.log
+
+# Jupyter
+.ipynb_checkpoints
+
+# Editors / tooling
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project data / outputs
+mne_data/
+outputs_eegmmidb_lr/
