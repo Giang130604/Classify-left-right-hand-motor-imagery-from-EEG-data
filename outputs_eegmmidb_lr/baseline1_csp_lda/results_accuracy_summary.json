@@ -1,0 +1,23 @@
+{
+  "CL1_PA1_CSP_LDA_cross_subject": {
+    "mean_accuracy": 0.6419592956741059
+  },
+  "CL1_PA2_FBCSP_cross_subject": {
+    "mean_accuracy_best_per_subject": 0.6361830594327533,
+    "mean_accuracy_by_variant": {
+      "lda": 0.6361830594327533
+    },
+    "best_variant_by_per_subject_mean": "lda",
+    "overall_accuracy": {
+      "lda": 0.6413502109704642
+    },
+    "best_variant_overall": "lda"
+  },
+  "CL2_PA2_FBCSP_subject": {
+    "mean_accuracy_best_per_subject": 0.6549990877577084,
+    "mean_accuracy_lda": 0.5799580368545886,
+    "mean_accuracy_svm": 0.5821109286626529,
+    "mean_accuracy_lda_svm": 0.5774037584382412,
+    "best_variant_by_mean": "svm"
+  }
+}
